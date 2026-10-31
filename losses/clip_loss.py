@@ -1,11 +1,13 @@
 import torch
 import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
 import numpy as np
 
 import clip
 from PIL import Image
 
 from utils.text_templates import imagenet_templates, part_templates, imagenet_templates_small
+from losses.ot_loss import sinkhorn, sinkhorn_divergence, cosine_cost
 
 
 class DirectionLoss(torch.nn.Module):
@@ -27,12 +29,46 @@ class DirectionLoss(torch.nn.Module):
         
         return self.loss_func(x, y)
 
+class PatchEmbedMatmul(torch.nn.Module):
+    """Drop-in replacement for a ViT patch-embedding Conv2d (kernel_size == stride, no padding) as patchify + matmul.
+
+    Mathematically identical, but on Apple Silicon the MPS backward of a 16x16/stride-16 conv w.r.t. its
+    input is >1000x slower than the matmul (1.7 s vs 1.4 ms for 8 images on an M5 Pro), and that gradient is
+    exactly what CLIP guidance backpropagates through. Shares the conv's parameters.
+    """
+
+    def __init__(self, conv: torch.nn.Conv2d):
+        super().__init__()
+        assert conv.kernel_size == conv.stride and conv.padding == (0, 0) and conv.groups == 1
+        self.weight = conv.weight  # CLIP's VisionTransformer reads its dtype from conv1.weight
+        self.bias = conv.bias
+        self.patch = conv.kernel_size[0]
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        p = self.patch
+        patches = x.reshape(b, c, h // p, p, w // p, p).permute(0, 2, 4, 1, 3, 5).reshape(b, (h // p) * (w // p), c * p * p)
+        out = patches @ self.weight.reshape(self.weight.shape[0], -1).T
+        if self.bias is not None:
+            out = out + self.bias
+        return out.transpose(1, 2).reshape(b, -1, h // p, w // p)
+
+
+def load_clip(name, device):
+    model, preprocess = clip.load(name, device=device)
+    conv1 = getattr(getattr(model, "visual", None), "conv1", None)
+    if torch.device(device).type == "mps" and isinstance(conv1, torch.nn.Conv2d) and conv1.kernel_size == conv1.stride:
+        model.visual.conv1 = PatchEmbedMatmul(conv1)
+    return model, preprocess
+
+
 class CLIPLoss(torch.nn.Module):
-    def __init__(self, device, lambda_direction=1., lambda_patch=0., lambda_global=0., lambda_manifold=0., lambda_texture=0., patch_loss_type='mae', direction_loss_type='cosine', clip_model='ViT-B/32'):
+    def __init__(self, device, lambda_direction=1., lambda_patch=0., lambda_global=0., lambda_manifold=0., lambda_texture=0., patch_loss_type='mae', direction_loss_type='cosine', clip_model='ViT-B/32',
+                 lambda_ot=0., ot_eps=0.05, ot_n_views=8, ot_n_iters=100):
         super(CLIPLoss, self).__init__()
 
         self.device = device
-        self.model, clip_preprocess = clip.load(clip_model, device=self.device)
+        self.model, clip_preprocess = load_clip(clip_model, self.device)
 
         self.clip_preprocess = clip_preprocess
         
@@ -57,12 +93,23 @@ class CLIPLoss(torch.nn.Module):
         self.target_text_features = None
         self.angle_loss = torch.nn.L1Loss()
 
-        self.model_cnn, preprocess_cnn = clip.load("RN50", device=self.device)
-        self.preprocess_cnn = transforms.Compose([transforms.Normalize(mean=[-1.0, -1.0, -1.0], std=[2.0, 2.0, 2.0])] + # Un-normalize from [-1.0, 1.0] (GAN output) to [0, 1].
-                                        preprocess_cnn.transforms[:2] +                                                 # to match CLIP input scale assumptions
-                                        preprocess_cnn.transforms[4:])                                                  # + skip convert PIL to tensor
+        # RN50 is only used by the texture loss; loading it unconditionally costs ~250MB and seconds per run
+        self.model_cnn = None
+        if self.lambda_texture:
+            self.model_cnn, preprocess_cnn = clip.load("RN50", device=self.device)
+            self.preprocess_cnn = transforms.Compose([transforms.Normalize(mean=[-1.0, -1.0, -1.0], std=[2.0, 2.0, 2.0])] + # Un-normalize from [-1.0, 1.0] (GAN output) to [0, 1].
+                                            preprocess_cnn.transforms[:2] +                                                 # to match CLIP input scale assumptions
+                                            preprocess_cnn.transforms[4:])                                                  # + skip convert PIL to tensor
 
         self.texture_loss = torch.nn.MSELoss()
+
+        # Optimal-transport directional loss
+        self.lambda_ot = lambda_ot
+        self.ot_eps = ot_eps
+        self.ot_n_views = ot_n_views
+        self.ot_n_iters = ot_n_iters
+        self.template_text_directions = None
+        self.text_self_ot = None
 
     def tokenize(self, strings: list):
         return clip.tokenize(strings).to(self.device)
@@ -95,7 +142,7 @@ class CLIPLoss(torch.nn.Module):
         text_features = self.encode_text(tokens).detach()
 
         if norm:
-            text_features /= text_features.norm(dim=-1, keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         return text_features
 
@@ -103,7 +150,7 @@ class CLIPLoss(torch.nn.Module):
         image_features = self.encode_images(img)
         
         if norm:
-            image_features /= image_features.clone().norm(dim=-1, keepdim=True)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
         return image_features
 
@@ -176,8 +223,53 @@ class CLIPLoss(torch.nn.Module):
         target_encoding = self.get_image_features(target_img)
 
         edit_direction = (target_encoding - src_encoding)
-        edit_direction /= (edit_direction.clone().norm(dim=-1, keepdim=True) + 1e-7)
+        edit_direction = edit_direction / (edit_direction.norm(dim=-1, keepdim=True) + 1e-7)
         return self.direction_loss(edit_direction, self.target_direction).mean()
+
+    def compute_template_text_directions(self, source_class: str, target_class: str) -> torch.Tensor:
+        # one edit direction per prompt template ([T, d]) instead of their mean
+        source_features = self.get_text_features(source_class).float()
+        target_features = self.get_text_features(target_class).float()
+        directions = target_features - source_features
+        return directions / directions.norm(dim=-1, keepdim=True)
+
+    def paired_views(self, src_img: torch.Tensor, target_img: torch.Tensor, n_views: int):
+        """The full image plus n_views - 1 random resized crops/flips, applied identically to source and target
+        so each view pair measures the edit rather than the augmentation. Returns two [n_views * B, C, H, W]."""
+        src_views, target_views = [src_img], [target_img]
+        size = src_img.shape[-2:]
+        for _ in range(n_views - 1):
+            i, j, h, w = transforms.RandomResizedCrop.get_params(src_img, scale=(0.5, 1.0), ratio=(3 / 4, 4 / 3))
+            flip = torch.rand(()).item() < 0.5
+            for img, views in ((src_img, src_views), (target_img, target_views)):
+                v = TF.resized_crop(img, i, j, h, w, list(size), antialias=True)
+                views.append(TF.hflip(v) if flip else v)
+        return torch.cat(src_views), torch.cat(target_views)
+
+    def clip_ot_directional_loss(self, src_img: torch.Tensor, source_class: str, target_img: torch.Tensor, target_class: str) -> torch.Tensor:
+        """Sinkhorn divergence between the distribution of image edit directions (over augmented views) and
+        the distribution of text edit directions (over prompt templates), with cost 1 - cos.
+
+        The standard directional loss collapses both sides to a single mean vector; this matches the
+        full distributions, so the edit has to agree with the set of template directions rather than
+        with one averaged direction that no individual prompt actually produces."""
+        if self.template_text_directions is None:
+            self.template_text_directions = self.compute_template_text_directions(source_class, target_class)
+            text = self.template_text_directions.unsqueeze(0)
+            self.text_self_ot, _ = sinkhorn(cosine_cost(text, text), self.ot_eps, self.ot_n_iters)
+
+        batch = src_img.shape[0]
+        src_views, target_views = self.paired_views(src_img, target_img, self.ot_n_views)
+        with torch.set_grad_enabled(src_img.requires_grad and torch.is_grad_enabled()):
+            src_encoding = self.get_image_features(src_views)
+        target_encoding = self.get_image_features(target_views)
+
+        # OT in fp32: CLIP features are fp16 on GPU/MPS and exp(-C/eps) underflows in half precision
+        directions = (target_encoding - src_encoding).float()
+        directions = directions.reshape(self.ot_n_views, batch, -1).transpose(0, 1)  # [B, views, d]
+        text = self.template_text_directions.unsqueeze(0).expand(batch, -1, -1)       # [B, templates, d]
+
+        return sinkhorn_divergence(directions, text, self.ot_eps, self.ot_n_iters, yy=self.text_self_ot).mean()
 
     def global_clip_loss(self, img: torch.Tensor, text) -> torch.Tensor:
         if not isinstance(text, list):
@@ -278,6 +370,20 @@ class CLIPLoss(torch.nn.Module):
 
         return self.texture_loss(src_features, target_features)
 
+    def directional_log_loss(self, src_img: torch.Tensor, source_class: str, target_img: torch.Tensor, target_class: str) -> torch.Tensor:
+        """DiffusionCLIP's -log((2 - L) / 2) transform applied to each directional term separately.
+
+        Each term lies in [0, 2], but a weighted sum of them need not, and log of a negative number is NaN."""
+        def log_term(loss):
+            return -torch.log((2 - loss).clamp_min(1e-6) / 2)
+
+        loss = 0.0
+        if self.lambda_direction:
+            loss += self.lambda_direction * log_term(self.clip_directional_loss(src_img, source_class, target_img, target_class))
+        if self.lambda_ot:
+            loss += self.lambda_ot * log_term(self.clip_ot_directional_loss(src_img, source_class, target_img, target_class))
+        return loss
+
     def forward(self, src_img: torch.Tensor, source_class: str, target_img: torch.Tensor, target_class: str, texture_image: torch.Tensor = None):
         clip_loss = 0.0
 
@@ -295,5 +401,8 @@ class CLIPLoss(torch.nn.Module):
 
         if self.lambda_texture and (texture_image is not None):
             clip_loss += self.lambda_texture * self.cnn_feature_loss(texture_image, target_img)
+
+        if self.lambda_ot:
+            clip_loss += self.lambda_ot * self.clip_ot_directional_loss(src_img, source_class, target_img, target_class)
 
         return clip_loss

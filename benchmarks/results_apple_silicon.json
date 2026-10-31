@@ -1,0 +1,202 @@
+{
+  "meta": {
+    "chip": "Apple M5 Pro",
+    "macos": "27.0.1",
+    "torch": "2.15.0",
+    "python": "3.13.14"
+  },
+  "results": [
+    {
+      "name": "original: CPU fp32",
+      "device": "cpu",
+      "sdpa": false,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": true,
+      "batch": 1,
+      "ddim_step_ms": 240.2689583347334,
+      "finetune_step_ms": 1206.4805416642532,
+      "max_abs_err_vs_cpu_fp32": 2.1696090698242188e-05
+    },
+    {
+      "name": "MPS fp32 (naive port)",
+      "device": "mps",
+      "sdpa": false,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": true,
+      "batch": 1,
+      "ddim_step_ms": 41.184887499548495,
+      "finetune_step_ms": 498.55693340068683,
+      "max_abs_err_vs_cpu_fp32": 2.5272369384765625e-05
+    },
+    {
+      "name": "+ no forced attention recompute",
+      "device": "mps",
+      "sdpa": false,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 1,
+      "ddim_step_ms": 40.92118750268128,
+      "finetune_step_ms": 489.75312499678694,
+      "max_abs_err_vs_cpu_fp32": 2.6941299438476562e-05
+    },
+    {
+      "name": "+ SDPA attention",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 1,
+      "ddim_step_ms": 39.10948330012616,
+      "finetune_step_ms": 485.44605820206925,
+      "max_abs_err_vs_cpu_fp32": 2.002716064453125e-05
+    },
+    {
+      "name": "+ CLIP patch-embed as matmul",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 1,
+      "ddim_step_ms": 38.895279201096855,
+      "finetune_step_ms": 264.69353339634836,
+      "max_abs_err_vs_cpu_fp32": 1.4722347259521484e-05
+    },
+    {
+      "name": "  + channels_last (rejected)",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "None",
+      "channels_last": true,
+      "attn_recompute": false,
+      "batch": 1,
+      "ddim_step_ms": 54.643300001043826,
+      "finetune_step_ms": 334.9601667956449,
+      "max_abs_err_vs_cpu_fp32": 3.8623809814453125e-05
+    },
+    {
+      "name": "  + bf16 autocast",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "bfloat16",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 1,
+      "ddim_step_ms": 41.07889579900075,
+      "finetune_step_ms": 319.0979165956378,
+      "max_abs_err_vs_cpu_fp32": 0.04324150085449219
+    },
+    {
+      "name": "  + fp16 autocast",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "float16",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 1,
+      "ddim_step_ms": 40.951991698239,
+      "finetune_step_ms": 261.979116598377,
+      "max_abs_err_vs_cpu_fp32": 0.004664897918701172
+    },
+    {
+      "name": "original: CPU fp32",
+      "device": "cpu",
+      "sdpa": false,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": true,
+      "batch": 8,
+      "ddim_step_ms": 1374.3538886677318,
+      "finetune_step_ms": 8729.43966666935,
+      "max_abs_err_vs_cpu_fp32": 2.950429916381836e-05
+    },
+    {
+      "name": "MPS fp32 (naive port)",
+      "device": "mps",
+      "sdpa": false,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": true,
+      "batch": 8,
+      "ddim_step_ms": 235.84731250011828,
+      "finetune_step_ms": 2920.790175005095,
+      "max_abs_err_vs_cpu_fp32": 3.886222839355469e-05
+    },
+    {
+      "name": "+ no forced attention recompute",
+      "device": "mps",
+      "sdpa": false,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 8,
+      "ddim_step_ms": 234.14147079747636,
+      "finetune_step_ms": 2873.462424997706,
+      "max_abs_err_vs_cpu_fp32": 2.9146671295166016e-05
+    },
+    {
+      "name": "+ SDPA attention",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 8,
+      "ddim_step_ms": 233.07694579998497,
+      "finetune_step_ms": 2966.426116594812,
+      "max_abs_err_vs_cpu_fp32": 4.655122756958008e-05
+    },
+    {
+      "name": "+ CLIP patch-embed as matmul",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "None",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 8,
+      "ddim_step_ms": 235.09464999951888,
+      "finetune_step_ms": 1182.4324667977635,
+      "max_abs_err_vs_cpu_fp32": 2.562999725341797e-05
+    },
+    {
+      "name": "  + channels_last (rejected)",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "None",
+      "channels_last": true,
+      "attn_recompute": false,
+      "batch": 8,
+      "ddim_step_ms": 268.52523749985266,
+      "finetune_step_ms": 1255.4365165997297,
+      "max_abs_err_vs_cpu_fp32": 3.904104232788086e-05
+    },
+    {
+      "name": "  + bf16 autocast",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "bfloat16",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 8,
+      "ddim_step_ms": 145.21254999854136,
+      "finetune_step_ms": 885.0896167976316,
+      "max_abs_err_vs_cpu_fp32": 0.050312042236328125
+    },
+    {
+      "name": "  + fp16 autocast",
+      "device": "mps",
+      "sdpa": true,
+      "amp": "float16",
+      "channels_last": false,
+      "attn_recompute": false,
+      "batch": 8,
+      "ddim_step_ms": 145.23082500090823,
+      "finetune_step_ms": 884.3578333966434,
+      "max_abs_err_vs_cpu_fp32": 0.004695415496826172
+    }
+  ]
+}

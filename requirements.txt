@@ -1,10 +1,20 @@
-cmake>=3.22.3
-lmdb>=1.2.1
+torch>=2.5          # Apple Silicon (MPS) autocast + fused SDPA attention
+torchvision>=0.20
+git+https://github.com/openai/CLIP.git
+setuptools<81       # CLIP imports pkg_resources
 numpy>=1.19.2
-Pillow>=8.4.0
+scipy>=1.5
+Pillow>=9.1.0
 PyYAML>=6.0
 tqdm>=4.55.1
-opencv_python>=4.5.2.52
 ftfy>=6.0.3
 regex>=2021.10.23
-dlib>=19.22.1
+matplotlib>=3.5
+opencv_python>=4.5.2.52
+lmdb>=1.2.1
+gradio>=4.0         # ui.py
+lpips>=0.1.4        # benchmarks/eval_edits.py
+pytest>=7           # tests/
+# optional, face alignment for CelebA/FFHQ only:
+# cmake>=3.22.3
+# dlib>=19.22.1

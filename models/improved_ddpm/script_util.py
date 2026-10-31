@@ -42,6 +42,28 @@ IMAGENET_DICT = dict(
 )
 
 
+# guided-diffusion 64x64 ImageNet checkpoint (64x64_diffusion.pt), trained with the cosine noise schedule.
+# Like IMAGENET above it is class-conditional, but the label embedding is unused in UNetModel.forward.
+TINY_IMAGENET_DICT = dict(
+    attention_resolutions="32,16,8",
+    class_cond=True,
+    image_size=64,
+    learn_sigma=True,
+    num_channels=192,
+    num_head_channels=64,
+    num_res_blocks=3,
+    resblock_updown=True,
+    use_fp16=False,
+    use_scale_shift_norm=True,
+    dropout=0.1,
+    num_heads=4,
+    num_heads_upsample=-1,
+    channel_mult="",
+    use_checkpoint=False,
+    use_new_attention_order=True,
+)
+
+
 def create_model(
     image_size,
     num_channels,
@@ -104,6 +126,7 @@ def i_DDPM(dataset_name = 'AFHQ'):
         return create_model(**AFHQ_DICT)
     elif dataset_name == 'IMAGENET':
         return create_model(**IMAGENET_DICT)
+    elif dataset_name == 'TINY_IMAGENET':
+        return create_model(**TINY_IMAGENET_DICT)
     else:
-        print('Not implemented.')
-        exit()
+        raise NotImplementedError(f'No improved-DDPM config for dataset {dataset_name}')

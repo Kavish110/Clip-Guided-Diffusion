@@ -1,10 +1,11 @@
 import time
+import matplotlib
+matplotlib.use("Agg")  # headless: only savefig is used
 import matplotlib.pyplot as plt
 import json
 import os
 from glob import glob
 from tqdm import tqdm
-import os
 import numpy as np
 import cv2
 from PIL import Image
@@ -26,7 +27,41 @@ from configs.paths_config import (
     HYBRID_CONFIG,
 )
 from datasets.imagenet_dic import IMAGENET_DIC
-from utils.align_utils import run_alignment
+
+DDPM_CKPT_URLS = {
+    "bedroom": "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/bedroom.ckpt",
+    "church_outdoor": "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt",
+    "CelebA_HQ": "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt",
+}
+
+
+class SamplingAutocast(nn.DataParallel):
+    """DataParallel (a pass-through on MPS/CPU) that runs the model under fp16/bf16 autocast when no gradients
+    are needed, i.e. during inversion and sampling. Fine-tuning stays in fp32: fp16 activation gradients
+    can underflow without a GradScaler. `.module` is still the bare UNet, so checkpoints are unchanged."""
+
+    def __init__(self, module, amp_dtype=None):
+        super().__init__(module)
+        self.amp_dtype = amp_dtype
+
+    def forward(self, *inputs, **kwargs):
+        if self.amp_dtype is None or torch.is_grad_enabled():
+            return super().forward(*inputs, **kwargs)
+        device_type = next(self.module.parameters()).device.type
+        with torch.autocast(device_type=device_type, dtype=self.amp_dtype):
+            return super().forward(*inputs, **kwargs).float()
+
+
+def load_and_align(img_path, image_size, align_face):
+    if align_face:
+        try:
+            # dlib is only needed for face alignment, so import lazily
+            from utils.align_utils import run_alignment
+
+            return run_alignment(img_path, output_size=image_size)
+        except Exception:
+            pass
+    return Image.open(img_path).convert("RGB")
 
 
 class DiffusionCLIP(object):
@@ -34,9 +69,11 @@ class DiffusionCLIP(object):
         self.args = args
         self.config = config
         if device is None:
-            device = (
+            device = getattr(config, "device", None) or (
                 torch.device("cuda")
                 if torch.cuda.is_available()
+                else torch.device("mps")
+                if torch.backends.mps.is_available()
                 else torch.device("cpu")
             )
         self.device = device
@@ -46,6 +83,7 @@ class DiffusionCLIP(object):
             beta_start=config.diffusion.beta_start,
             beta_end=config.diffusion.beta_end,
             num_diffusion_timesteps=config.diffusion.num_diffusion_timesteps,
+            beta_schedule=getattr(config.diffusion, "beta_schedule", "linear"),
         )
         self.betas = torch.from_numpy(betas).float().to(self.device)
         self.num_timesteps = betas.shape[0]
@@ -61,6 +99,8 @@ class DiffusionCLIP(object):
 
         elif self.model_var_type == "fixedsmall":
             self.logvar = np.log(np.maximum(posterior_variance, 1e-20))
+        # keep it on the device so denoising_step does not copy it from host memory at every step
+        self.logvar = torch.from_numpy(self.logvar).float().to(self.device)
 
         if self.args.edit_attr is None:
             self.src_txts = self.args.src_txts
@@ -69,48 +109,55 @@ class DiffusionCLIP(object):
             self.src_txts = SRC_TRG_TXT_DIC[self.args.edit_attr][0]
             self.trg_txts = SRC_TRG_TXT_DIC[self.args.edit_attr][1]
 
+    def load_model(self, model_path=None):
+        """Builds the diffusion model for the configured dataset and loads `model_path` (or the
+        pretrained checkpoint). Returns (model, state_dict, learn_sigma)."""
+        dataset = self.config.data.dataset
+        if dataset in ["CelebA_HQ", "LSUN"]:
+            model = DDPM(self.config)
+            if model_path:
+                ckpt = torch.load(model_path, map_location="cpu")
+            else:
+                ckpt = torch.hub.load_state_dict_from_url(
+                    DDPM_CKPT_URLS[self.config.data.category], map_location="cpu"
+                )
+            learn_sigma = False
+            print("Original diffusion Model loaded.")
+        elif dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
+            model = i_DDPM(dataset)
+            ckpt = torch.load(model_path or MODEL_PATHS[dataset], map_location="cpu")
+            learn_sigma = True
+            print("Improved diffusion Model loaded.")
+        else:
+            raise ValueError(f"Not implemented dataset {dataset}")
+        model.load_state_dict(ckpt)
+        model.to(self.device)
+        amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(getattr(self.args, "amp", "none"))
+        model = SamplingAutocast(model, amp_dtype)
+        return model, ckpt, learn_sigma
+
+    def clip_loss(self, lambda_direction=1, lambda_global=0):
+        return CLIPLoss(
+            self.device,
+            lambda_direction=lambda_direction,
+            lambda_patch=0,
+            lambda_global=lambda_global,
+            lambda_manifold=0,
+            lambda_texture=0,
+            clip_model=self.args.clip_model_name,
+            lambda_ot=getattr(self.args, "lambda_ot", 0),
+            ot_eps=getattr(self.args, "ot_eps", 0.05),
+            ot_n_views=getattr(self.args, "ot_n_views", 8),
+            ot_n_iters=getattr(self.args, "ot_n_iters", 100),
+        )
+
     def clip_finetune(self):
         print(self.args.exp)
         print(f"   {self.src_txts}")
         print(f"-> {self.trg_txts}")
 
         # ----------- Model -----------#
-        if self.config.data.dataset == "LSUN":
-            if self.config.data.category == "bedroom":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/bedroom.ckpt"
-            elif self.config.data.category == "church_outdoor":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt"
-        elif self.config.data.dataset == "CelebA_HQ":
-            url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt"
-        elif self.config.data.dataset == "AFHQ":
-            pass
-        else:
-            raise ValueError
-
-        if self.config.data.dataset in ["CelebA_HQ", "LSUN"]:
-            model = DDPM(self.config)
-            if self.args.model_path:
-                init_ckpt = torch.load(self.args.model_path)
-            else:
-                init_ckpt = torch.hub.load_state_dict_from_url(
-                    url, map_location=self.device
-                )
-            learn_sigma = False
-            print("Original diffusion Model loaded.")
-        elif self.config.data.dataset in ["FFHQ", "AFHQ", "TINY_IMAGENET"]:
-            model = i_DDPM(self.config.data.dataset)
-            if self.args.model_path:
-                init_ckpt = torch.load(self.args.model_path)
-            else:
-                init_ckpt = torch.load(MODEL_PATHS[self.config.data.dataset])
-            learn_sigma = True
-            print("Improved diffusion Model loaded.")
-        else:
-            print("Not implemented dataset")
-            raise ValueError
-        model.load_state_dict(init_ckpt)
-        model.to(self.device)
-        model = torch.nn.DataParallel(model)
+        model, init_ckpt, learn_sigma = self.load_model(self.args.model_path)
 
         # ----------- Optimizer and Scheduler -----------#
         print(f"Setting optimizer with lr={self.args.lr_clip_finetune}")
@@ -125,16 +172,9 @@ class DiffusionCLIP(object):
 
         # ----------- Loss -----------#
         print("Loading losses")
-        clip_loss_func = CLIPLoss(
-            self.device,
-            lambda_direction=1,
-            lambda_patch=0,
-            lambda_global=0,
-            lambda_manifold=0,
-            lambda_texture=0,
-            clip_model=self.args.clip_model_name,
-        )
-        id_loss_func = id_loss.IDLoss().to(self.device).eval()
+        clip_loss_func = self.clip_loss(lambda_direction=self.args.lambda_direction)
+        # ArcFace weights are only shipped for faces; skip loading them when the ID loss is off
+        id_loss_func = id_loss.IDLoss().to(self.device).eval() if self.args.id_loss_w > 0 else None
 
         # ----------- Precompute Latents -----------#
         print("Prepare identity latent")
@@ -153,7 +193,7 @@ class DiffusionCLIP(object):
             print(pairs_path)
             if os.path.exists(pairs_path):
                 print(f"{mode} pairs exists")
-                img_lat_pairs_dic[mode] = torch.load(pairs_path)
+                img_lat_pairs_dic[mode] = torch.load(pairs_path, map_location="cpu")
                 for step, (x0, x_id, x_lat) in enumerate(img_lat_pairs_dic[mode]):
                     tvu.save_image(
                         (x0 + 1) * 0.5,
@@ -199,8 +239,8 @@ class DiffusionCLIP(object):
                         for it, (i, j) in enumerate(
                             zip((seq_inv_next[1:]), (seq_inv[1:]))
                         ):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_prev = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_prev = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -230,8 +270,8 @@ class DiffusionCLIP(object):
                         for it, (i, j) in enumerate(
                             zip(reversed((seq_inv)), reversed((seq_inv_next)))
                         ):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_next = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -289,6 +329,7 @@ class DiffusionCLIP(object):
             optim_ft.load_state_dict(init_opt_ckpt)
             scheduler_ft.load_state_dict(init_sch_ckpt)
             clip_loss_func.target_direction = None
+            clip_loss_func.template_text_directions = None
 
             # ----------- Train -----------#
             for it_out in range(self.args.n_iter):
@@ -299,7 +340,7 @@ class DiffusionCLIP(object):
                 if self.args.do_train:
                     if os.path.exists(save_name):
                         print(f"{save_name} already exists.")
-                        model.module.load_state_dict(torch.load(save_name))
+                        model.module.load_state_dict(torch.load(save_name, map_location="cpu"))
                         continue
                     else:
                         for step, (x0, x_id, x_lat) in enumerate(
@@ -309,7 +350,8 @@ class DiffusionCLIP(object):
                             time_in_start = time.time()
 
                             optim_ft.zero_grad()
-                            x = x_lat.clone()
+                            x = x_lat.clone().to(self.device)
+                            x0 = x0.to(self.device)
 
                             with tqdm(
                                 total=len(seq_train), desc=f"CLIP iteration"
@@ -317,8 +359,8 @@ class DiffusionCLIP(object):
                                 for t_it, (i, j) in enumerate(
                                     zip(reversed(seq_train), reversed(seq_train_next))
                                 ):
-                                    t = (torch.ones(n) * i).to(self.device)
-                                    t_next = (torch.ones(n) * j).to(self.device)
+                                    t = torch.full((x.shape[0],), float(i), device=self.device)
+                                    t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                                     x = denoising_step(
                                         x,
@@ -334,11 +376,8 @@ class DiffusionCLIP(object):
 
                                     progress_bar.update(1)
 
-                            loss_clip = (
-                                2 - clip_loss_func(x0, src_txt, x, trg_txt)
-                            ) / 2
-                            loss_clip = -torch.log(loss_clip)
-                            loss_id = torch.mean(id_loss_func(x0, x))
+                            loss_clip = clip_loss_func.directional_log_loss(x0, src_txt, x, trg_txt)
+                            loss_id = torch.mean(id_loss_func(x0, x)) if id_loss_func else torch.zeros((), device=self.device)
                             loss_l1 = nn.L1Loss()(x0, x)
                             loss = (
                                 self.args.clip_loss_w * loss_clip
@@ -348,7 +387,7 @@ class DiffusionCLIP(object):
                             loss.backward()
 
                             optim_ft.step()
-                                                        if not hasattr(self, 'loss_history'):
+                            if not hasattr(self, 'loss_history'):
                                 self.loss_history = {'clip': [], 'id': [], 'l1': [], 'total': []}
                             self.loss_history['clip'].append(loss_clip.item())
                             self.loss_history['id'].append(loss_id.item())
@@ -400,21 +439,22 @@ class DiffusionCLIP(object):
                 if self.args.do_test:
                     if not self.args.do_train:
                         print(save_name)
-                        model.module.load_state_dict(torch.load(save_name))
+                        model.module.load_state_dict(torch.load(save_name, map_location="cpu"))
 
                     model.eval()
+                    mode = "test"
                     img_lat_pairs = img_lat_pairs_dic[mode]
                     for step, (x0, x_id, x_lat) in enumerate(img_lat_pairs):
                         with torch.no_grad():
-                            x = x_lat
+                            x = x_lat.to(self.device)
                             with tqdm(
                                 total=len(seq_test), desc=f"Eval iteration"
                             ) as progress_bar:
                                 for i, j in zip(
                                     reversed(seq_test), reversed(seq_test_next)
                                 ):
-                                    t = (torch.ones(n) * i).to(self.device)
-                                    t_next = (torch.ones(n) * j).to(self.device)
+                                    t = torch.full((x.shape[0],), float(i), device=self.device)
+                                    t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                                     x = denoising_step(
                                         x,
@@ -447,42 +487,7 @@ class DiffusionCLIP(object):
         print(f"-> {self.trg_txts}")
 
         # ----------- Model -----------#
-        if self.config.data.dataset == "LSUN":
-            if self.config.data.category == "bedroom":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/bedroom.ckpt"
-            elif self.config.data.category == "church_outdoor":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt"
-        elif self.config.data.dataset == "CelebA_HQ":
-            url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt"
-        elif self.config.data.dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
-            pass
-        else:
-            raise ValueError
-
-        if self.config.data.dataset in ["CelebA_HQ", "LSUN"]:
-            model = DDPM(self.config)
-            if self.args.model_path:
-                init_ckpt = torch.load(self.args.model_path)
-            else:
-                init_ckpt = torch.hub.load_state_dict_from_url(
-                    url, map_location=self.device
-                )
-            learn_sigma = False
-            print("Original diffusion Model loaded.")
-        elif self.config.data.dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
-            model = i_DDPM(self.config.data.dataset)
-            if self.args.model_path:
-                init_ckpt = torch.load(self.args.model_path)
-            else:
-                init_ckpt = torch.load(MODEL_PATHS[self.config.data.dataset])
-            learn_sigma = True
-            print("Improved diffusion Model loaded.")
-        else:
-            print("Not implemented dataset")
-            raise ValueError
-        model.load_state_dict(init_ckpt)
-        model.to(self.device)
-        model = torch.nn.DataParallel(model)
+        model, init_ckpt, learn_sigma = self.load_model(self.args.model_path)
 
         # ----------- Optimizer and Scheduler -----------#
         print(f"Setting optimizer with lr={self.args.lr_clip_finetune}")
@@ -498,16 +503,8 @@ class DiffusionCLIP(object):
 
         # ----------- Loss -----------#
         print("Loading losses")
-        clip_loss_func = CLIPLoss(
-            self.device,
-            lambda_direction=1,
-            lambda_patch=0,
-            lambda_global=0,
-            lambda_manifold=0,
-            lambda_texture=0,
-            clip_model=self.args.clip_model_name,
-        )
-        if self.config.data.dataset == "CelebA_HQ":
+        clip_loss_func = self.clip_loss(lambda_direction=self.args.lambda_direction)
+        if self.config.data.dataset == "CelebA_HQ" and self.args.id_loss_w > 0:
             id_loss_func = id_loss.IDLoss().to(self.device).eval()
         else:
             id_loss_func = None
@@ -625,8 +622,8 @@ class DiffusionCLIP(object):
                         for it, (i, j) in enumerate(
                             zip((seq_inv_next[1:]), (seq_inv[1:]))
                         ):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_prev = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_prev = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -659,8 +656,8 @@ class DiffusionCLIP(object):
                         for it, (i, j) in enumerate(
                             zip(reversed((seq_inv)), reversed((seq_inv_next)))
                         ):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_next = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -718,6 +715,7 @@ class DiffusionCLIP(object):
             optim_ft.load_state_dict(init_opt_ckpt)
             scheduler_ft.load_state_dict(init_sch_ckpt)
             clip_loss_func.target_direction = None
+            clip_loss_func.template_text_directions = None
 
             # ----------- Train -----------#
             for it_out in range(self.args.n_iter):
@@ -728,7 +726,7 @@ class DiffusionCLIP(object):
                 if self.args.do_train:
                     if os.path.exists(save_name):
                         print(f"{save_name} already exists.")
-                        model.module.load_state_dict(torch.load(save_name))
+                        model.module.load_state_dict(torch.load(save_name, map_location="cpu"))
                         continue
                     else:
                         for step, (x0, _, x_lat) in enumerate(
@@ -746,8 +744,8 @@ class DiffusionCLIP(object):
                                 for t_it, (i, j) in enumerate(
                                     zip(reversed(seq_train), reversed(seq_train_next))
                                 ):
-                                    t = (torch.ones(n) * i).to(self.device)
-                                    t_next = (torch.ones(n) * j).to(self.device)
+                                    t = torch.full((x.shape[0],), float(i), device=self.device)
+                                    t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                                     x, x0_t = denoising_step(
                                         x,
@@ -765,27 +763,24 @@ class DiffusionCLIP(object):
                                     progress_bar.update(1)
                                     x = x.detach().clone()
 
-                                    loss_clip = -torch.log(
-                                        (2 - clip_loss_func(x0, src_txt, x0_t, trg_txt))
-                                        / 2
-                                    )
+                                    loss_clip = clip_loss_func.directional_log_loss(x0, src_txt, x0_t, trg_txt)
                                     loss_l1 = nn.L1Loss()(x0, x0_t)
                                     loss = (
                                         self.args.clip_loss_w * loss_clip
                                         + self.args.l1_loss_w * loss_l1
                                     )
-                                    if self.config.data.dataset == "CelebA_HQ":
-                                        loss_id = torch.mean(id_loss_func(x0, x))
+                                    if id_loss_func is not None:
+                                        loss_id = torch.mean(id_loss_func(x0, x0_t))
                                         loss += self.args.id_loss_w * loss_id
                                     loss.backward()
 
                                     optim_ft.step()
                                     for p in model.module.parameters():
                                         p.grad = None
-                                                                        if not hasattr(self, 'loss_history'):
+                                    if not hasattr(self, 'loss_history'):
                                         self.loss_history = {'clip': [], 'id': [], 'l1': [], 'total': []}
                                     self.loss_history['clip'].append(loss_clip.item())
-                                    if self.config.data.dataset == "CelebA_HQ":
+                                    if id_loss_func is not None:
                                         self.loss_history['id'].append(loss_id.item())
                                     else:
                                         self.loss_history['id'].append(0)
@@ -838,9 +833,10 @@ class DiffusionCLIP(object):
                 if self.args.do_test:
                     if not self.args.do_train:
                         print(save_name)
-                        model.module.load_state_dict(torch.load(save_name))
+                        model.module.load_state_dict(torch.load(save_name, map_location="cpu"))
 
                     model.eval()
+                    mode = "test"
                     img_lat_pairs = img_lat_pairs_dic[mode]
                     for step, (x0, x_id, x_lat) in enumerate(img_lat_pairs):
                         with torch.no_grad():
@@ -852,8 +848,8 @@ class DiffusionCLIP(object):
                                 for i, j in zip(
                                     reversed(seq_test), reversed(seq_test_next)
                                 ):
-                                    t = (torch.ones(n) * i).to(self.device)
-                                    t_next = (torch.ones(n) * j).to(self.device)
+                                    t = torch.full((x.shape[0],), float(i), device=self.device)
+                                    t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                                     x = denoising_step(
                                         x,
@@ -884,17 +880,13 @@ class DiffusionCLIP(object):
         # ----------- Data -----------#
         n = 1
 
-        if self.args.align_face and self.config.data.dataset in ["FFHQ", "CelebA_HQ"]:
-            try:
-                img = run_alignment(
-                    self.args.img_path, output_size=self.config.data.image_size
-                )
-            except:
-                img = Image.open(self.args.img_path).convert("RGB")
-        else:
-            img = Image.open(self.args.img_path).convert("RGB")
+        img = load_and_align(
+            self.args.img_path,
+            self.config.data.image_size,
+            self.args.align_face and self.config.data.dataset in ["FFHQ", "CelebA_HQ"],
+        )
         img = img.resize(
-            (self.config.data.image_size, self.config.data.image_size), Image.ANTIALIAS
+            (self.config.data.image_size, self.config.data.image_size), Image.LANCZOS
         )
         img = np.array(img) / 255
         img = (
@@ -908,54 +900,14 @@ class DiffusionCLIP(object):
         x0 = (img - 0.5) * 2.0
 
         # ----------- Model -----------#
-        if self.config.data.dataset == "LSUN":
-            if self.config.data.category == "bedroom":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/bedroom.ckpt"
-            elif self.config.data.category == "church_outdoor":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt"
-        elif self.config.data.dataset == "CelebA_HQ":
-            url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt"
-        elif self.config.data.dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
-            pass
-        else:
-            raise ValueError
-
-        if self.config.data.dataset in ["CelebA_HQ", "LSUN"]:
-            model = DDPM(self.config)
-            if self.args.model_path:
-                ckpt = torch.load(self.args.model_path)
-            else:
-                ckpt = torch.hub.load_state_dict_from_url(url, map_location=self.device)
-            learn_sigma = False
-            print("Original diffusion Model loaded.")
-        elif self.config.data.dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
-            model = i_DDPM(self.config.data.dataset)
-            if self.args.model_path:
-                ckpt = torch.load(self.args.model_path)
-            else:
-                ckpt = torch.load(MODEL_PATHS[self.config.data.dataset])
-            learn_sigma = True
-            print("Improved diffusion Model loaded.")
-        else:
-            print("Not implemented dataset")
-            raise ValueError
-        model.load_state_dict(ckpt)
-        model.to(self.device)
-        model = torch.nn.DataParallel(model)
+        model, _, learn_sigma = self.load_model(self.args.model_path)
         model.eval()
 
         # ----------- Loss -----------#
         print("Loading losses")
-        id_loss_func = id_loss.IDLoss().to(self.device).eval()
-        clip_loss_func = CLIPLoss(
-            self.device,
-            lambda_direction=0,
-            lambda_patch=0,
-            lambda_global=1,
-            lambda_manifold=0,
-            lambda_texture=0,
-            clip_model=self.args.clip_model_name,
-        )
+        # ArcFace weights are only shipped for faces; skip loading them when the ID loss is off
+        id_loss_func = id_loss.IDLoss().to(self.device).eval() if self.args.id_loss_w > 0 else None
+        clip_loss_func = self.clip_loss(lambda_direction=0, lambda_global=1)
 
         # ----------- Invert Image to Latent -----------#
         seq_inv = np.linspace(0, 1, self.args.n_inv_step) * self.args.t_0
@@ -967,8 +919,8 @@ class DiffusionCLIP(object):
 
             with tqdm(total=len(seq_inv), desc=f"Inversion process") as progress_bar:
                 for it, (i, j) in enumerate(zip((seq_inv_next[1:]), (seq_inv[1:]))):
-                    t = (torch.ones(n) * i).to(self.device)
-                    t_prev = (torch.ones(n) * j).to(self.device)
+                    t = torch.full((x.shape[0],), float(i), device=self.device)
+                    t_prev = torch.full((x.shape[0],), float(j), device=self.device)
 
                     x = denoising_step(
                         x,
@@ -1012,6 +964,7 @@ class DiffusionCLIP(object):
                 [x_lat], weight_decay=0, lr=self.args.lr_clip_lat_opt
             )
             clip_loss_func.target_direction = None
+            clip_loss_func.template_text_directions = None
 
             with torch.set_grad_enabled(True):
                 for it in range(self.args.n_iter):
@@ -1021,8 +974,8 @@ class DiffusionCLIP(object):
                         total=len(seq_train), desc=f"Generative process {trg_txt}-{it}"
                     ) as progress_bar:
                         for i, j in zip(reversed(seq_train), reversed(seq_train_next)):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_next = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -1039,7 +992,7 @@ class DiffusionCLIP(object):
 
                     loss_clip = (2 - clip_loss_func(x0, src_txt, x, trg_txt)) / 2
                     loss_clip = -torch.log(loss_clip)
-                    loss_id = torch.mean(id_loss_func(x0, x))
+                    loss_id = torch.mean(id_loss_func(x0, x)) if id_loss_func else torch.zeros((), device=self.device)
                     loss_l1 = nn.L1Loss()(x0, x)
 
                     loss = (
@@ -1064,43 +1017,10 @@ class DiffusionCLIP(object):
     def edit_images_from_dataset(self):
         # ----------- Models -----------#
         print(self.args.exp)
-        if self.config.data.dataset == "LSUN":
-            if self.config.data.category == "bedroom":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/bedroom.ckpt"
-            elif self.config.data.category == "church_outdoor":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt"
-        elif self.config.data.dataset == "CelebA_HQ":
-            url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt"
-        elif self.config.data.dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
-            pass
-        else:
-            raise ValueError
-
         models = []
         model_paths = [None, self.args.model_path]
         for model_path in model_paths:
-            if self.config.data.dataset in ["CelebA_HQ", "LSUN"]:
-                model_i = DDPM(self.config)
-                if model_path:
-                    ckpt = torch.load(model_path)
-                else:
-                    ckpt = torch.hub.load_state_dict_from_url(
-                        url, map_location=self.device
-                    )
-                learn_sigma = False
-            elif self.config.data.dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
-                model_i = i_DDPM(self.config.data.dataset)
-                if model_path:
-                    ckpt = torch.load(model_path)
-                else:
-                    ckpt = torch.load(MODEL_PATHS[self.config.data.dataset])
-                learn_sigma = True
-            else:
-                print("Not implemented dataset")
-                raise ValueError
-            model_i.load_state_dict(ckpt)
-            model_i.to(self.device)
-            model_i = torch.nn.DataParallel(model_i)
+            model_i, _, learn_sigma = self.load_model(model_path)
             model_i.eval()
             print(f"{model_path} is loaded.")
             models.append(model_i)
@@ -1121,7 +1041,7 @@ class DiffusionCLIP(object):
 
             if os.path.exists(pairs_path):
                 print(f"{mode} pairs exists")
-                img_lat_pairs_dic[mode] = torch.load(pairs_path)
+                img_lat_pairs_dic[mode] = torch.load(pairs_path, map_location="cpu")
                 for step, (x0, x_id, e_id) in enumerate(img_lat_pairs_dic[mode]):
                     tvu.save_image(
                         (x0 + 1) * 0.5,
@@ -1165,8 +1085,8 @@ class DiffusionCLIP(object):
                         for it, (i, j) in enumerate(
                             zip((seq_inv_next[1:]), (seq_inv[1:]))
                         ):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_prev = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_prev = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -1198,8 +1118,8 @@ class DiffusionCLIP(object):
                         for it, (i, j) in enumerate(
                             zip(reversed((seq_inv)), reversed((seq_inv_next)))
                         ):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_next = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -1254,13 +1174,13 @@ class DiffusionCLIP(object):
             for step, (x0, x_id, x_lat) in enumerate(img_lat_pairs):
 
                 with torch.no_grad():
-                    x = x_lat
+                    x = x_lat.to(self.device)
                     with tqdm(
                         total=len(seq_test), desc=f"Eval iteration"
                     ) as progress_bar:
                         for i, j in zip(reversed(seq_test), reversed(seq_test_next)):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_next = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -1292,17 +1212,13 @@ class DiffusionCLIP(object):
         # ----------- Data -----------#
         n = self.args.bs_test
 
-        if self.args.align_face and self.config.data.dataset in ["FFHQ", "CelebA_HQ"]:
-            try:
-                img = run_alignment(
-                    self.args.img_path, output_size=self.config.data.image_size
-                )
-            except:
-                img = Image.open(self.args.img_path).convert("RGB")
-        else:
-            img = Image.open(self.args.img_path).convert("RGB")
+        img = load_and_align(
+            self.args.img_path,
+            self.config.data.image_size,
+            self.args.align_face and self.config.data.dataset in ["FFHQ", "CelebA_HQ"],
+        )
         img = img.resize(
-            (self.config.data.image_size, self.config.data.image_size), Image.ANTIALIAS
+            (self.config.data.image_size, self.config.data.image_size), Image.LANCZOS
         )
         img = np.array(img) / 255
         img = (
@@ -1317,18 +1233,6 @@ class DiffusionCLIP(object):
         x0 = (img - 0.5) * 2.0
 
         # ----------- Models -----------#
-        if self.config.data.dataset == "LSUN":
-            if self.config.data.category == "bedroom":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/bedroom.ckpt"
-            elif self.config.data.category == "church_outdoor":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt"
-        elif self.config.data.dataset == "CelebA_HQ":
-            url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt"
-        elif self.config.data.dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
-            pass
-        else:
-            raise ValueError
-
         models = []
 
         if self.args.hybrid_noise:
@@ -1337,28 +1241,7 @@ class DiffusionCLIP(object):
             model_paths = [None, self.args.model_path]
 
         for model_path in model_paths:
-            if self.config.data.dataset in ["CelebA_HQ", "LSUN"]:
-                model_i = DDPM(self.config)
-                if model_path:
-                    ckpt = torch.load(model_path)
-                else:
-                    ckpt = torch.hub.load_state_dict_from_url(
-                        url, map_location=self.device
-                    )
-                learn_sigma = False
-            elif self.config.data.dataset in ["FFHQ", "AFHQ", "IMAGENET", "TINY_IMAGENET"]:
-                model_i = i_DDPM(self.config.data.dataset)
-                if model_path:
-                    ckpt = torch.load(model_path)
-                else:
-                    ckpt = torch.load(MODEL_PATHS[self.config.data.dataset])
-                learn_sigma = True
-            else:
-                print("Not implemented dataset")
-                raise ValueError
-            model_i.load_state_dict(ckpt)
-            model_i.to(self.device)
-            model_i = torch.nn.DataParallel(model_i)
+            model_i, _, learn_sigma = self.load_model(model_path)
             model_i.eval()
             print(f"{model_path} is loaded.")
             models.append(model_i)
@@ -1382,8 +1265,8 @@ class DiffusionCLIP(object):
                         for it, (i, j) in enumerate(
                             zip((seq_inv_next[1:]), (seq_inv[1:]))
                         ):
-                            t = (torch.ones(n) * i).to(self.device)
-                            t_prev = (torch.ones(n) * j).to(self.device)
+                            t = torch.full((x.shape[0],), float(i), device=self.device)
+                            t_prev = torch.full((x.shape[0],), float(j), device=self.device)
 
                             x = denoising_step(
                                 x,
@@ -1403,7 +1286,7 @@ class DiffusionCLIP(object):
                         torch.save(x_lat, x_lat_path)
                 else:
                     print("Latent exists.")
-                    x_lat = torch.load(x_lat_path)
+                    x_lat = torch.load(x_lat_path, map_location=self.device)
 
             # ----------- Generative Process -----------#
             print(
@@ -1440,8 +1323,8 @@ class DiffusionCLIP(object):
                     total=len(seq_test), desc="Generative process {}".format(it)
                 ) as progress_bar:
                     for i, j in zip(reversed(seq_test), reversed(seq_test_next)):
-                        t = (torch.ones(n) * i).to(self.device)
-                        t_next = (torch.ones(n) * j).to(self.device)
+                        t = torch.full((x.shape[0],), float(i), device=self.device)
+                        t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                         x = denoising_step(
                             x,
@@ -1498,7 +1381,7 @@ class DiffusionCLIP(object):
         # else:
         img = Image.open(self.args.img_path).convert("RGB")
         img = img.resize(
-            (self.config.data.image_size, self.config.data.image_size), Image.ANTIALIAS
+            (self.config.data.image_size, self.config.data.image_size), Image.LANCZOS
         )
         img = np.array(img) / 255
         img = (
@@ -1513,43 +1396,10 @@ class DiffusionCLIP(object):
         x0 = (img - 0.5) * 2.0
 
         # ----------- Models -----------#
-        if self.config.data.dataset == "LSUN":
-            if self.config.data.category == "bedroom":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/bedroom.ckpt"
-            elif self.config.data.category == "church_outdoor":
-                url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt"
-        elif self.config.data.dataset == "CelebA_HQ":
-            url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt"
-        elif self.config.data.dataset == "AFHQ":
-            pass
-        else:
-            raise ValueError
-
         models = []
         model_paths = [None, self.args.model_path]
         for model_path in model_paths:
-            if self.config.data.dataset in ["CelebA_HQ", "LSUN"]:
-                model_i = DDPM(self.config)
-                if model_path:
-                    ckpt = torch.load(model_path)
-                else:
-                    ckpt = torch.hub.load_state_dict_from_url(
-                        url, map_location=self.device
-                    )
-                learn_sigma = False
-            elif self.config.data.dataset in ["FFHQ", "AFHQ", "TINY_IMAGENET"]:
-                model_i = i_DDPM(self.config.data.dataset)
-                if model_path:
-                    ckpt = torch.load(model_path)
-                else:
-                    ckpt = torch.load(MODEL_PATHS[self.config.data.dataset])
-                learn_sigma = True
-            else:
-                print("Not implemented dataset")
-                raise ValueError
-            model_i.load_state_dict(ckpt)
-            model_i.to(self.device)
-            model_i = torch.nn.DataParallel(model_i)
+            model_i, _, learn_sigma = self.load_model(model_path)
             model_i.eval()
             print(f"{model_path} is loaded.")
             models.append(model_i)
@@ -1580,8 +1430,8 @@ class DiffusionCLIP(object):
                     total=len(seq_test), desc="Generative process {}".format(it)
                 ) as progress_bar:
                     for i, j in zip(reversed(seq_test), reversed(seq_test_next)):
-                        t = (torch.ones(n) * i).to(self.device)
-                        t_next = (torch.ones(n) * j).to(self.device)
+                        t = torch.full((x.shape[0],), float(i), device=self.device)
+                        t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                         x = denoising_step(
                             x,
@@ -1616,8 +1466,8 @@ class DiffusionCLIP(object):
             x = x0.clone()
             with tqdm(total=len(seq_inv), desc=f"Inversion process ") as progress_bar:
                 for it, (i, j) in enumerate(zip((seq_inv_next[1:]), (seq_inv[1:]))):
-                    t = (torch.ones(n) * i).to(self.device)
-                    t_prev = (torch.ones(n) * j).to(self.device)
+                    t = torch.full((x.shape[0],), float(i), device=self.device)
+                    t_prev = torch.full((x.shape[0],), float(j), device=self.device)
 
                     x = denoising_step(
                         x,
@@ -1661,8 +1511,8 @@ class DiffusionCLIP(object):
                 total=len(seq_test), desc="Generative process {}".format(it)
             ) as progress_bar:
                 for i, j in zip(reversed(seq_test), reversed(seq_test_next)):
-                    t = (torch.ones(n) * i).to(self.device)
-                    t_next = (torch.ones(n) * j).to(self.device)
+                    t = torch.full((x.shape[0],), float(i), device=self.device)
+                    t_next = torch.full((x.shape[0],), float(j), device=self.device)
 
                     x = denoising_step(
                         x,

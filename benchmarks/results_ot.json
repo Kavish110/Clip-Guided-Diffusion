@@ -1,0 +1,432 @@
+{
+  "runs": [
+    {
+      "src_txt": "photo",
+      "trg_txt": "watercolor art",
+      "method": "direction",
+      "lambda_direction": 1.0,
+      "lambda_ot": 0.0,
+      "run_dir": "runs/cmp_watercolor_art_direction_FT_TINY_IMAGENET_['watercolor art']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 456.0324161052704,
+      "train_s_per_image": 1.5936499999999998,
+      "clip_direction": {
+        "mean": 0.1016920804977417,
+        "std": 0.04770848527550697
+      },
+      "clip_target": {
+        "mean": 0.2531786561012268,
+        "std": 0.01244886964559555
+      },
+      "clip_target_gain": {
+        "mean": 0.0686991736292839,
+        "std": 0.024330144748091698
+      },
+      "lpips": {
+        "mean": 0.3852187991142273,
+        "std": 0.16013894975185394
+      },
+      "l1": {
+        "mean": 0.18740402162075043,
+        "std": 0.028297169134020805
+      }
+    },
+    {
+      "src_txt": "photo",
+      "trg_txt": "watercolor art",
+      "method": "ot",
+      "lambda_direction": 0.0,
+      "lambda_ot": 1.0,
+      "run_dir": "runs/cmp_watercolor_art_ot_FT_TINY_IMAGENET_['watercolor art']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06_dir0.0_ot1.0",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 533.0641338825226,
+      "train_s_per_image": 1.96815,
+      "clip_direction": {
+        "mean": 0.1578759402036667,
+        "std": 0.04267864301800728
+      },
+      "clip_target": {
+        "mean": 0.2571839392185211,
+        "std": 0.01174778863787651
+      },
+      "clip_target_gain": {
+        "mean": 0.07270447909832001,
+        "std": 0.024402940645813942
+      },
+      "lpips": {
+        "mean": 0.25201135873794556,
+        "std": 0.14045479893684387
+      },
+      "l1": {
+        "mean": 0.1517585813999176,
+        "std": 0.023089753463864326
+      },
+      "paired_vs_direction": {
+        "clip_direction": {
+          "mean": 0.05618388205766678,
+          "ci95": 0.014783868454385361,
+          "p": 7.384012974398502e-07
+        },
+        "clip_target_gain": {
+          "mean": 0.004005304537713528,
+          "ci95": 0.006287207178036594,
+          "p": 0.19458657503128052
+        },
+        "lpips": {
+          "mean": -0.13320741057395935,
+          "ci95": 0.029132983397788796,
+          "p": 7.004017987810585e-08
+        }
+      }
+    },
+    {
+      "src_txt": "photo",
+      "trg_txt": "pencil sketch",
+      "method": "direction",
+      "lambda_direction": 1.0,
+      "lambda_ot": 0.0,
+      "run_dir": "runs/cmp_pencil_sketch_direction_FT_TINY_IMAGENET_['pencil sketch']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 453.57417011260986,
+      "train_s_per_image": 1.5833,
+      "clip_direction": {
+        "mean": 0.10449617356061935,
+        "std": 0.046411916613578796
+      },
+      "clip_target": {
+        "mean": 0.24780486524105072,
+        "std": 0.012419493868947029
+      },
+      "clip_target_gain": {
+        "mean": 0.07835935056209564,
+        "std": 0.021398941054940224
+      },
+      "lpips": {
+        "mean": 0.3397963047027588,
+        "std": 0.11908398568630219
+      },
+      "l1": {
+        "mean": 0.19563794136047363,
+        "std": 0.024062400683760643
+      }
+    },
+    {
+      "src_txt": "photo",
+      "trg_txt": "pencil sketch",
+      "method": "ot",
+      "lambda_direction": 0.0,
+      "lambda_ot": 1.0,
+      "run_dir": "runs/cmp_pencil_sketch_ot_FT_TINY_IMAGENET_['pencil sketch']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06_dir0.0_ot1.0",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 542.9658150672913,
+      "train_s_per_image": 1.9934,
+      "clip_direction": {
+        "mean": 0.09456793963909149,
+        "std": 0.04409709572792053
+      },
+      "clip_target": {
+        "mean": 0.24145503342151642,
+        "std": 0.013969063758850098
+      },
+      "clip_target_gain": {
+        "mean": 0.07200951129198074,
+        "std": 0.02107890322804451
+      },
+      "lpips": {
+        "mean": 0.3276500105857849,
+        "std": 0.14161182940006256
+      },
+      "l1": {
+        "mean": 0.18268583714962006,
+        "std": 0.04515022039413452
+      },
+      "paired_vs_direction": {
+        "clip_direction": {
+          "mean": -0.009928236715495586,
+          "ci95": 0.014448430826938093,
+          "p": 0.1636667549610138
+        },
+        "clip_target_gain": {
+          "mean": -0.006349831819534302,
+          "ci95": 0.007129391736732885,
+          "p": 0.07705681025981903
+        },
+        "lpips": {
+          "mean": -0.012146305292844772,
+          "ci95": 0.07797383979456061,
+          "p": 0.7444645166397095
+        }
+      }
+    },
+    {
+      "src_txt": "photo",
+      "trg_txt": "pencil sketch",
+      "method": "direction+ot",
+      "lambda_direction": 1.0,
+      "lambda_ot": 2.5,
+      "run_dir": "runs/cmp_pencil_sketch_direction_ot_FT_TINY_IMAGENET_['pencil sketch']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06_dir1.0_ot2.5",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 650.1677341461182,
+      "train_s_per_image": 2.5073999999999996,
+      "clip_direction": {
+        "mean": 0.1156550720334053,
+        "std": 0.055703986436128616
+      },
+      "clip_target": {
+        "mean": 0.25156593322753906,
+        "std": 0.016197247430682182
+      },
+      "clip_target_gain": {
+        "mean": 0.08212040364742279,
+        "std": 0.02500910870730877
+      },
+      "lpips": {
+        "mean": 0.3491184115409851,
+        "std": 0.12878334522247314
+      },
+      "l1": {
+        "mean": 0.1976497620344162,
+        "std": 0.0340837687253952
+      },
+      "paired_vs_direction": {
+        "clip_direction": {
+          "mean": 0.011158894747495651,
+          "ci95": 0.015665115163051073,
+          "p": 0.1497274488210678
+        },
+        "clip_target_gain": {
+          "mean": 0.0037610605359077454,
+          "ci95": 0.007026657071422395,
+          "p": 0.2718118131160736
+        },
+        "lpips": {
+          "mean": 0.009322057478129864,
+          "ci95": 0.042022742532341346,
+          "p": 0.643142819404602
+        }
+      }
+    },
+    {
+      "src_txt": "photo",
+      "trg_txt": "painting by Gogh",
+      "method": "direction",
+      "lambda_direction": 1.0,
+      "lambda_ot": 0.0,
+      "run_dir": "runs/cmp_painting_by_Gogh_direction_FT_TINY_IMAGENET_['painting by Gogh']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 473.153422832489,
+      "train_s_per_image": 1.6709,
+      "clip_direction": {
+        "mean": 0.1608072966337204,
+        "std": 0.04628969356417656
+      },
+      "clip_target": {
+        "mean": 0.3021501898765564,
+        "std": 0.022577954456210136
+      },
+      "clip_target_gain": {
+        "mean": 0.13141575455665588,
+        "std": 0.036006055772304535
+      },
+      "lpips": {
+        "mean": 0.4219464659690857,
+        "std": 0.144734188914299
+      },
+      "l1": {
+        "mean": 0.19275030493736267,
+        "std": 0.02852984517812729
+      }
+    },
+    {
+      "src_txt": "photo",
+      "trg_txt": "painting by Gogh",
+      "method": "ot",
+      "lambda_direction": 0.0,
+      "lambda_ot": 1.0,
+      "run_dir": "runs/cmp_painting_by_Gogh_ot_FT_TINY_IMAGENET_['painting by Gogh']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06_dir0.0_ot1.0",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 604.3695211410522,
+      "train_s_per_image": 2.24915,
+      "clip_direction": {
+        "mean": 0.1674516201019287,
+        "std": 0.04476279392838478
+      },
+      "clip_target": {
+        "mean": 0.307366281747818,
+        "std": 0.021317902952432632
+      },
+      "clip_target_gain": {
+        "mean": 0.1366318315267563,
+        "std": 0.03817734122276306
+      },
+      "lpips": {
+        "mean": 0.49487966299057007,
+        "std": 0.12564097344875336
+      },
+      "l1": {
+        "mean": 0.22632110118865967,
+        "std": 0.026460230350494385
+      },
+      "paired_vs_direction": {
+        "clip_direction": {
+          "mean": 0.006644328124821186,
+          "ci95": 0.009236742421065511,
+          "p": 0.14603763818740845
+        },
+        "clip_target_gain": {
+          "mean": 0.005216086283326149,
+          "ci95": 0.006560853141199609,
+          "p": 0.11081136763095856
+        },
+        "lpips": {
+          "mean": 0.07293319702148438,
+          "ci95": 0.030267290427747395,
+          "p": 0.00012181396596133709
+        }
+      }
+    },
+    {
+      "src_txt": "photo",
+      "trg_txt": "painting by Gogh",
+      "method": "direction+ot",
+      "lambda_direction": 1.0,
+      "lambda_ot": 2.5,
+      "run_dir": "runs/cmp_painting_by_Gogh_direction_ot_FT_TINY_IMAGENET_['painting by Gogh']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06_dir1.0_ot2.5",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 703.7226717472076,
+      "train_s_per_image": 2.8160499999999997,
+      "clip_direction": {
+        "mean": 0.1656935065984726,
+        "std": 0.04396599531173706
+      },
+      "clip_target": {
+        "mean": 0.3054569661617279,
+        "std": 0.02089429274201393
+      },
+      "clip_target_gain": {
+        "mean": 0.1347225308418274,
+        "std": 0.03458859398961067
+      },
+      "lpips": {
+        "mean": 0.46889472007751465,
+        "std": 0.13378925621509552
+      },
+      "l1": {
+        "mean": 0.21929019689559937,
+        "std": 0.02623855322599411
+      },
+      "paired_vs_direction": {
+        "clip_direction": {
+          "mean": 0.004886202979832888,
+          "ci95": 0.006665824977107493,
+          "p": 0.13904120028018951
+        },
+        "clip_target_gain": {
+          "mean": 0.003306778147816658,
+          "ci95": 0.003943393070120479,
+          "p": 0.09409914165735245
+        },
+        "lpips": {
+          "mean": 0.046948324888944626,
+          "ci95": 0.023928056130385362,
+          "p": 0.0008014742052182555
+        }
+      }
+    },
+    {
+      "src_txt": "photo",
+      "trg_txt": "watercolor art",
+      "method": "direction+ot",
+      "lambda_direction": 1.0,
+      "lambda_ot": 2.5,
+      "run_dir": "runs/cmp_watercolor_art_direction_ot_FT_TINY_IMAGENET_['watercolor art']_t500_ninv40_ngen6_id0.0_l10.0_lr4e-06_dir1.0_ot2.5",
+      "it": 4,
+      "n_test_images": 16,
+      "wall_s": 635.7160692214966,
+      "train_s_per_image": 2.3589,
+      "clip_direction": {
+        "mean": 0.1480044424533844,
+        "std": 0.04737846180796623
+      },
+      "clip_target": {
+        "mean": 0.261380672454834,
+        "std": 0.011517404578626156
+      },
+      "clip_target_gain": {
+        "mean": 0.07690119743347168,
+        "std": 0.025446562096476555
+      },
+      "lpips": {
+        "mean": 0.31601667404174805,
+        "std": 0.15943719446659088
+      },
+      "l1": {
+        "mean": 0.1641167849302292,
+        "std": 0.027916694059967995
+      },
+      "paired_vs_direction": {
+        "clip_direction": {
+          "mean": 0.0463123694062233,
+          "ci95": 0.011526679079005703,
+          "p": 3.6856411611552176e-07
+        },
+        "clip_target_gain": {
+          "mean": 0.008202028460800648,
+          "ci95": 0.006599627952709425,
+          "p": 0.01822889782488346
+        },
+        "lpips": {
+          "mean": -0.06920208036899567,
+          "ci95": 0.012500086496921855,
+          "p": 5.437277295072818e-09
+        }
+      }
+    }
+  ],
+  "settings": {
+    "methods": "direction,ot,direction+ot",
+    "lambda_ot": 1.0,
+    "lambda_ot_hybrid": 2.5,
+    "t_0": 500,
+    "n_train_img": 40,
+    "n_test_img": 16,
+    "n_iter": 5,
+    "lr": 4e-06,
+    "figure_rows": 6,
+    "out": "benchmarks/results_ot.json"
+  },
+  "figure_classes": {
+    "watercolor art": [
+      "triumphal arch",
+      "goldfish",
+      "computer keyboard",
+      "drumstick",
+      "coral reef",
+      "bell pepper"
+    ],
+    "pencil sketch": [
+      "triumphal arch",
+      "goldfish",
+      "computer keyboard",
+      "drumstick",
+      "coral reef",
+      "bell pepper"
+    ],
+    "painting by Gogh": [
+      "triumphal arch",
+      "goldfish",
+      "computer keyboard",
+      "drumstick",
+      "coral reef",
+      "bell pepper"
+    ]
+  }
+}

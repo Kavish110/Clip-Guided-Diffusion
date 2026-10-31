@@ -1,6 +1,7 @@
 from .AFHQ_dataset import get_afhq_dataset
 from .CelebA_HQ_dataset import get_celeba_dataset
 from .LSUN_dataset import get_lsun_dataset
+import torch
 from torch.utils.data import DataLoader
 from .IMAGENET_dataset import get_imagenet_dataset
 from .TINY_IMAGENET_dataset import get_tiny_imagenet_dataset
@@ -23,6 +24,8 @@ def get_dataset(dataset_type, dataset_paths, config, target_class_num=None, gend
 
 
 def get_dataloader(train_dataset, test_dataset, bs_train=1, num_workers=0):
+    # pinned memory only helps host->CUDA copies; on MPS/CPU it just warns
+    pin_memory = torch.cuda.is_available()
     train_loader = DataLoader(
         train_dataset,
         batch_size=bs_train,
@@ -30,7 +33,7 @@ def get_dataloader(train_dataset, test_dataset, bs_train=1, num_workers=0):
         shuffle=True,
         sampler=None,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -39,7 +42,7 @@ def get_dataloader(train_dataset, test_dataset, bs_train=1, num_workers=0):
         sampler=None,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
 
     return {'train': train_loader, 'test': test_loader}

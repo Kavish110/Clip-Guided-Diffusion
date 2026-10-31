@@ -10,7 +10,7 @@ import numpy as np
 from diffusionclip import DiffusionCLIP
 from configs.paths_config import HYBRID_MODEL_PATHS
 
-def parse_args_and_config():
+def parse_args_and_config(argv=None):
     parser = argparse.ArgumentParser(description=globals()['__doc__'])
 
     # Mode
@@ -20,7 +20,6 @@ def parse_args_and_config():
     parser.add_argument('--edit_one_image', action='store_true')
     parser.add_argument('--unseen2unseen', action='store_true')
     parser.add_argument('--clip_finetune_eff', action='store_true')
-    parser.add_argument('--edit_one_image_eff', action='store_true')
 
     # Default
     parser.add_argument('--config', type=str, required=True, help='Path to the config file')
@@ -30,6 +29,9 @@ def parse_args_and_config():
     parser.add_argument('--verbose', type=str, default='info', help='Verbose level: info | debug | warning | critical')
     parser.add_argument('--ni', type=int, default=1,  help="No interaction. Suitable for Slurm Job launcher")
     parser.add_argument('--align_face', type=int, default=1, help='align face or not')
+    parser.add_argument('--device', type=str, default=None, help='cuda | mps | cpu (default: best available)')
+    parser.add_argument('--amp', type=str, default='none', choices=['none', 'fp16', 'bf16'],
+                        help='Mixed precision for inversion/sampling (no-grad passes only). fp16 is ~1.6x faster on Apple Silicon at batch 8')
 
     # Text
     parser.add_argument('--edit_attr', type=str, default=None, help='Attribute to edit defiend in ./utils/text_dic.py')
@@ -62,28 +64,37 @@ def parse_args_and_config():
 
 
     # Loss & Optimization
-    parser.add_argument('--clip_loss_w', type=int, default=3, help='Weights of CLIP loss')
+    parser.add_argument('--clip_loss_w', type=float, default=3, help='Weights of CLIP loss')
     parser.add_argument('--l1_loss_w', type=float, default=0, help='Weights of L1 loss')
     parser.add_argument('--id_loss_w', type=float, default=0, help='Weights of ID loss')
     parser.add_argument('--clip_model_name', type=str, default='ViT-B/16', help='ViT-B/16, ViT-B/32, RN50x16 etc')
+    parser.add_argument('--lambda_direction', type=float, default=1, help='Weight of the (mean) directional CLIP loss inside the CLIP loss')
+    parser.add_argument('--lambda_ot', type=float, default=0, help='Weight of the optimal-transport (Sinkhorn) directional CLIP loss')
+    parser.add_argument('--ot_eps', type=float, default=0.05, help='Entropic regularisation of the Sinkhorn solver')
+    parser.add_argument('--ot_n_views', type=int, default=8, help='# of augmented views forming the image edit-direction distribution')
+    parser.add_argument('--ot_n_iters', type=int, default=100, help='Max Sinkhorn iterations')
     parser.add_argument('--lr_clip_finetune', type=float, default=2e-6, help='Initial learning rate for finetuning')
     parser.add_argument('--lr_clip_lat_opt', type=float, default=2e-2, help='Initial learning rate for latent optim')
     parser.add_argument('--n_iter', type=int, default=1, help='# of iterations of a generative process with `n_train_img` images')
     parser.add_argument('--scheduler', type=int, default=1, help='Whether to increase the learning rate')
     parser.add_argument('--sch_gamma', type=float, default=1.3, help='Scheduler gamma')
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if not args.edit_attr:
+        args.edit_attr = None
 
-    # parse config file
-    with open(os.path.join('configs', args.config), 'r') as f:
+    # parse config file (accepts both `tiny_imagenet.yml` and `configs/tiny_imagenet.yml`)
+    config_path = args.config if os.path.exists(args.config) else os.path.join('configs', args.config)
+    with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     new_config = dict2namespace(config)
 
+    loss_str = f'_dir{args.lambda_direction}_ot{args.lambda_ot}' if args.lambda_ot else ''
     if args.clip_finetune or args.clip_finetune_eff :
         if args.edit_attr is not None:
-            args.exp = args.exp + f'_FT_{new_config.data.category}_{args.edit_attr}_t{args.t_0}_ninv{args.n_inv_step}_ngen{args.n_train_step}_id{args.id_loss_w}_l1{args.l1_loss_w}_lr{args.lr_clip_finetune}'
+            args.exp = args.exp + f'_FT_{new_config.data.category}_{args.edit_attr}_t{args.t_0}_ninv{args.n_inv_step}_ngen{args.n_train_step}_id{args.id_loss_w}_l1{args.l1_loss_w}_lr{args.lr_clip_finetune}{loss_str}'
         else:
-            args.exp = args.exp + f'_FT_{new_config.data.category}_{args.trg_txts}_t{args.t_0}_ninv{args.n_inv_step}_ngen{args.n_train_step}_id{args.id_loss_w}_l1{args.l1_loss_w}_lr{args.lr_clip_finetune}'
+            args.exp = args.exp + f'_FT_{new_config.data.category}_{args.trg_txts}_t{args.t_0}_ninv{args.n_inv_step}_ngen{args.n_train_step}_id{args.id_loss_w}_l1{args.l1_loss_w}_lr{args.lr_clip_finetune}{loss_str}'
     elif args.clip_latent_optim:
         if args.edit_attr is not None:
             args.exp = args.exp + f'_LO_{new_config.data.category}_{args.img_path.split("/")[-1].split(".")[0]}_{args.edit_attr}_t{args.t_0}_ninv{args.n_inv_step}_ngen{args.n_train_step}_id{args.id_loss_w}_l1{args.l1_loss_w}_lr{args.lr_clip_lat_opt}'
@@ -128,11 +139,6 @@ def parse_args_and_config():
         else:
             args.exp = args.exp + f'_U2U_{new_config.data.category}_{args.img_path.split("/")[-1].split(".")[0]}_t{args.t_0}_ninv{args.n_train_step}_ngen{args.n_train_step}_orig'
 
-    elif args.recon_exp:
-        args.exp = args.exp + f'_REC_{new_config.data.category}_{args.img_path.split("/")[-1].split(".")[0]}_t{args.t_0}_ninv{args.n_train_step}'
-    elif args.find_best_image:
-        args.exp = args.exp + f'_FOpt_{new_config.data.category}_{args.trg_txts[0]}_t{args.t_0}_ninv{args.n_train_step}'
-
 
     level = getattr(logging, args.verbose.upper(), None)
     if not isinstance(level, int):
@@ -170,7 +176,7 @@ def parse_args_and_config():
             sys.exit(0)
 
     # add device
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    device = torch.device(args.device) if args.device else get_default_device()
     logging.info("Using device: {}".format(device))
     new_config.device = device
 
@@ -185,6 +191,15 @@ def parse_args_and_config():
     return args, new_config
 
 
+def get_default_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if torch.backends.mps.is_available():
+        # Apple Silicon GPU (Metal Performance Shaders)
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
 def dict2namespace(config):
     namespace = argparse.Namespace()
     for key, value in config.items():
@@ -196,8 +211,8 @@ def dict2namespace(config):
     return namespace
 
 
-def main():
-    args, config = parse_args_and_config()
+def main(argv=None):
+    args, config = parse_args_and_config(argv)
     print(">" * 80)
     logging.info("Exp instance id = {}".format(os.getpid()))
     logging.info("Exp comment = {}".format(args.comment))
@@ -217,8 +232,6 @@ def main():
             runner.edit_images_from_dataset()
         elif args.edit_one_image:
             runner.edit_one_image()
-        elif args.edit_one_image_eff:
-            runner.edit_one_image_eff()
         elif args.unseen2unseen:
             runner.unseen2unseen()
         else:
@@ -226,7 +239,7 @@ def main():
             raise ValueError
     except Exception:
         logging.error(traceback.format_exc())
-
+        return 1
 
     return 0
 

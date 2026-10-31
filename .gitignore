@@ -1,1 +1,17 @@
 pretrained/
+
+# datasets and generated artefacts: only the curated figures in assets/ are committed
+data/
+runs/
+checkpoint/
+precomputed/
+results/
+*.pth
+*.pt
+
+# environment / caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

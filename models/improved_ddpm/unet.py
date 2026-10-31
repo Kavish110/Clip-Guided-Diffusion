@@ -23,6 +23,10 @@ from .nn import (
     timestep_embedding,
 )
 
+# Fused attention kernel (Metal on Apple Silicon, flash/mem-efficient on CUDA) instead of explicit
+# einsum + softmax, which materialises the full T x T score matrix (1024 x 1024 at 32x32 resolution).
+USE_SDPA = hasattr(F, "scaled_dot_product_attention")
+
 
 class AttentionPool2d(nn.Module):
     """
@@ -299,7 +303,9 @@ class AttentionBlock(nn.Module):
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x):
-        return checkpoint(self._forward, (x,), self.parameters(), True)
+        # was hard-coded to True: every backward pass silently recomputed all attention blocks
+        # (and the recompute ran outside autocast, breaking mixed precision)
+        return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
 
     def _forward(self, x):
         b, c, *spatial = x.shape
@@ -350,6 +356,9 @@ class QKVAttentionLegacy(nn.Module):
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
+        if USE_SDPA:
+            a = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+            return a.transpose(1, 2).reshape(bs, -1, length)
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
             "bct,bcs->bts", q * scale, k * scale
@@ -383,6 +392,10 @@ class QKVAttention(nn.Module):
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.chunk(3, dim=1)
+        if USE_SDPA:
+            q, k, v = (z.reshape(bs * self.n_heads, ch, length).transpose(1, 2) for z in (q, k, v))
+            a = F.scaled_dot_product_attention(q, k, v)
+            return a.transpose(1, 2).reshape(bs, -1, length)
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
             "bct,bcs->bts",

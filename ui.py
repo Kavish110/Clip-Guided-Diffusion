@@ -1,9 +1,13 @@
 import gradio as gr
 import glob
 import os
-import time
+import sys
 
-def get_latest_images(result_dir="results"):
+# main.py writes every experiment under runs/<exp>/image_samples
+RESULT_DIR = sys.argv[1] if len(sys.argv) > 1 else "runs"
+
+
+def get_latest_images(result_dir=RESULT_DIR):
     # Recursively find pngs
     images = glob.glob(f"{result_dir}/**/*.png", recursive=True)
     # Sort files by modification time
@@ -12,7 +16,7 @@ def get_latest_images(result_dir="results"):
     paths = images[:10]
     return paths
 
-def get_loss_plot(result_dir="results"):
+def get_loss_plot(result_dir=RESULT_DIR):
     loss_plots = glob.glob(f"{result_dir}/**/training_loss.png", recursive=True)
     if loss_plots:
         loss_plots.sort(key=os.path.getmtime, reverse=True)
